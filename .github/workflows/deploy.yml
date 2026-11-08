@@ -1,0 +1,99 @@
+
+name: Recipe App CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run backend tests
+        run: npm test
+        working-directory: backend
+
+      - name: Run frontend tests
+        run: npm test
+        working-directory: frontend
+
+      - name: Authenticate to Google Cloud
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/252661442872/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider'
+          service_account: 'github-actions-deployer@project-9a838512-0c49-4c82-80a.iam.gserviceaccount.com'
+
+      - name: Set up Google Cloud CLI
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: 'project-9a838512-0c49-4c82-80a'
+
+      - name: Configure Docker for Artifact Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
+
+      - name: Build and push backend image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker build \
+            -f backend/dockerfile \
+            -t us-east1-docker.pkg.dev/project-9a838512-0c49-4c82-80a/recipe-images/recipe-backend:${{ github.sha }} \
+            backend
+
+          docker push us-east1-docker.pkg.dev/project-9a838512-0c49-4c82-80a/recipe-images/recipe-backend:${{ github.sha }}
+
+      - name: Build and push frontend image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker build \
+            -f frontend/Dockerfile \
+            --build-arg VITE_API_URL=https://recipe-backend-252661442872.us-east1.run.app \
+            -t us-east1-docker.pkg.dev/project-9a838512-0c49-4c82-80a/recipe-images/recipe-frontend:${{ github.sha }} \
+            frontend
+
+          docker push us-east1-docker.pkg.dev/project-9a838512-0c49-4c82-80a/recipe-images/recipe-frontend:${{ github.sha }}
+
+      - name: Deploy backend to Cloud Run
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          gcloud run deploy recipe-backend \
+            --image us-east1-docker.pkg.dev/project-9a838512-0c49-4c82-80a/recipe-images/recipe-backend:${{ github.sha }} \
+            --region us-east1 \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 5000
+
+      - name: Deploy frontend to Cloud Run
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          gcloud run deploy recipe-frontend \
+            --image us-east1-docker.pkg.dev/project-9a838512-0c49-4c82-80a/recipe-images/recipe-frontend:${{ github.sha }} \
+            --region us-east1 \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 80
